@@ -1,0 +1,12 @@
+{
+    "name":  "Local Message Spoofer",
+    "description":  "Create local-only fake messages, edit them locally, and build fake conversations. Testing and novelty only - nothing is sent to Discord.",
+    "authors":  [
+                    {
+                        "name":  "jack",
+                        "id":  "1390362049581678672"
+                    }
+                ],
+    "main":  "index.js",
+    "hash":  "94663DC5B9E678A81CEB07C32497BECC7CEDAF9692BDEC639070881D6511EB7E"
+}
