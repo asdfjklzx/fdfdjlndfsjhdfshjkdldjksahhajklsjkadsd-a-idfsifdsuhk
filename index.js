@@ -827,11 +827,12 @@
     } catch {}
     return id;
   }
-  // Try openPrivateChannel across the argument shapes different builds expect.
-  // Returns true if a call went through without throwing.
+  // Try openPrivateChannel with ONLY the single-recipient shapes. The array
+  // shape ({ recipientIds: [id] }) is the group-create signature on some
+  // builds and turns a 1:1 DM into a one-person group, so it's excluded.
   function _tryOpenPrivate(acts, id) {
     if (!acts || typeof acts.openPrivateChannel !== "function") return !1;
-    const shapes = [id, { recipientId: id }, { recipientIds: [id] }, { userId: id }];
+    const shapes = [id, { recipientId: id }, { userId: id }];
     for (let i = 0; i < shapes.length; i++) {
       try {
         acts.openPrivateChannel(shapes[i]);
@@ -890,39 +891,34 @@
     const ens = l.findByProps("ensurePrivateChannel");
     const PCS = l.findByStoreName("PrivateChannelStore");
 
-    // 1) Primary iOS path: openPrivateChannel creates + navigates in one call.
-    if (_tryOpenPrivate(acts, id)) {
-      tt("Opening DM with " + _dmNameFor(id));
-      return;
-    }
-
-    // 2) Resolve the channel id ourselves, creating it if needed.
+    // 1) Existing 1:1 DM? Resolve its channel id and just navigate there.
+    //    This avoids openPrivateChannel entirely for the common case, so no
+    //    chance of it spawning a group.
     let channelId = null;
     try {
       if (PCS && typeof PCS.getDMFromUserId === "function")
         channelId = PCS.getDMFromUserId(id);
     } catch {}
-
-    if (!channelId && ens && typeof ens.ensurePrivateChannel === "function") {
-      try {
-        channelId = await ens.ensurePrivateChannel(id);
-      } catch {}
-    }
-
-    // 3) Navigate to whatever we resolved.
     if (channelId && _tryNavigate(channelId)) {
       tt("Opening DM with " + _dmNameFor(id));
       return;
     }
 
-    // 4) Last resort: re-fetch the id after a beat (ensure can lag) and retry.
-    if (!channelId) {
+    // 2) No existing DM: create the 1:1 channel with ensurePrivateChannel
+    //    (returns the channel id), then navigate to it.
+    if (!channelId && ens && typeof ens.ensurePrivateChannel === "function") {
       try {
-        if (PCS && typeof PCS.getDMFromUserId === "function")
-          channelId = PCS.getDMFromUserId(id);
+        channelId = await ens.ensurePrivateChannel(id);
       } catch {}
     }
     if (channelId && _tryNavigate(channelId)) {
+      tt("Opening DM with " + _dmNameFor(id));
+      return;
+    }
+
+    // 3) Last resort only: single-recipient openPrivateChannel (no array
+    //    shapes, so it won't create a group). Some builds create + navigate.
+    if (_tryOpenPrivate(acts, id)) {
       tt("Opening DM with " + _dmNameFor(id));
       return;
     }
