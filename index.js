@@ -827,84 +827,111 @@
     } catch {}
     return id;
   }
+  // Try openPrivateChannel across the argument shapes different builds expect.
+  // Returns true if a call went through without throwing.
+  function _tryOpenPrivate(acts, id) {
+    if (!acts || typeof acts.openPrivateChannel !== "function") return !1;
+    const shapes = [id, { recipientId: id }, { recipientIds: [id] }, { userId: id }];
+    for (let i = 0; i < shapes.length; i++) {
+      try {
+        acts.openPrivateChannel(shapes[i]);
+        return !0;
+      } catch {}
+    }
+    return !1;
+  }
+  // Try to navigate to an already-resolved channel id via whatever navigator
+  // this build exposes. selectChannel is the mobile/iOS path; the others are
+  // desktop-style fallbacks. Returns true if a call went through.
+  function _tryNavigate(channelId) {
+    if (!channelId) return !1;
+    const sc = l.findByProps("selectChannel");
+    if (sc && typeof sc.selectChannel === "function") {
+      const shapes = [
+        { guildId: null, channelId: channelId },
+        { guildId: "@me", channelId: channelId },
+        { channelId: channelId },
+        channelId,
+      ];
+      for (let i = 0; i < shapes.length; i++) {
+        try {
+          sc.selectChannel(shapes[i]);
+          return !0;
+        } catch {}
+      }
+    }
+    const tr = l.findByProps("transitionToChannel");
+    if (tr && typeof tr.transitionToChannel === "function") {
+      try {
+        tr.transitionToChannel(channelId);
+        return !0;
+      } catch {}
+    }
+    const oc = l.findByProps("openChannel");
+    if (oc && typeof oc.openChannel === "function") {
+      try {
+        oc.openChannel({ channelId: channelId });
+        return !0;
+      } catch {}
+    }
+    return !1;
+  }
   // Resolve (or create) the DM channel for a user and navigate to it.
-  // Accepts a bare ID, a <@id> mention, or a profile URL. Every module
-  // lookup is guarded so a missing module toasts instead of throwing.
+  // Accepts a bare ID, a <@id> mention, or a profile URL. iOS-first: on mobile
+  // openPrivateChannel both creates and navigates, so we try that before
+  // falling back to resolve-then-select. Every lookup is guarded.
   async function openDM(userId) {
     const id = _extractUserId(userId);
     if (!id) {
       tt("Invalid user - expected an ID, mention, or profile link.");
       return;
     }
+    const acts = l.findByProps("openPrivateChannel");
+    const ens = l.findByProps("ensurePrivateChannel");
     const PCS = l.findByStoreName("PrivateChannelStore");
-    if (!PCS || typeof PCS.getDMFromUserId !== "function") {
-      tt("Couldn't find PrivateChannelStore on this version.");
+
+    // 1) Primary iOS path: openPrivateChannel creates + navigates in one call.
+    if (_tryOpenPrivate(acts, id)) {
+      tt("Opening DM with " + _dmNameFor(id));
       return;
     }
-    let channelId;
+
+    // 2) Resolve the channel id ourselves, creating it if needed.
+    let channelId = null;
     try {
-      channelId = PCS.getDMFromUserId(id);
-    } catch {
-      tt("Failed to look up an existing DM.");
-      return;
-    }
-    if (!channelId) {
-      const ens = l.findByProps("ensurePrivateChannel");
-      const acts = l.findByProps("openPrivateChannel");
-      if (ens && typeof ens.ensurePrivateChannel === "function") {
-        try {
-          channelId = await ens.ensurePrivateChannel(id);
-        } catch {
-          tt("Couldn't create a DM with that user.");
-          return;
-        }
-      } else if (acts && typeof acts.openPrivateChannel === "function") {
-        // Creates + navigates in one call on most builds. Signature varies:
-        // some builds want { recipientId: id } or { recipientIds: [id] }.
-        try {
-          acts.openPrivateChannel(id);
-          tt("Opening DM with " + _dmNameFor(id));
-          return;
-        } catch {
-          tt("Couldn't open a DM with that user.");
-          return;
-        }
-      } else {
-        tt("No DM-open API found on this version.");
-        return;
-      }
-    }
-    if (!channelId) {
-      tt("Couldn't resolve a DM channel.");
-      return;
-    }
-    const router =
-      l.findByProps("transitionToChannel") ||
-      l.findByProps("openChannel") ||
-      null;
-    if (router) {
+      if (PCS && typeof PCS.getDMFromUserId === "function")
+        channelId = PCS.getDMFromUserId(id);
+    } catch {}
+
+    if (!channelId && ens && typeof ens.ensurePrivateChannel === "function") {
       try {
-        if (typeof router.transitionToChannel === "function") {
-          router.transitionToChannel(channelId);
-          tt("Opening DM with " + _dmNameFor(id));
-          return;
-        }
-        if (typeof router.openChannel === "function") {
-          router.openChannel({ channelId: channelId });
-          tt("Opening DM with " + _dmNameFor(id));
-          return;
-        }
+        channelId = await ens.ensurePrivateChannel(id);
       } catch {}
     }
-    const acts2 = l.findByProps("openPrivateChannel");
-    if (acts2 && typeof acts2.openPrivateChannel === "function") {
+
+    // 3) Navigate to whatever we resolved.
+    if (channelId && _tryNavigate(channelId)) {
+      tt("Opening DM with " + _dmNameFor(id));
+      return;
+    }
+
+    // 4) Last resort: re-fetch the id after a beat (ensure can lag) and retry.
+    if (!channelId) {
       try {
-        acts2.openPrivateChannel(id);
-        tt("Opening DM with " + _dmNameFor(id));
-        return;
+        if (PCS && typeof PCS.getDMFromUserId === "function")
+          channelId = PCS.getDMFromUserId(id);
       } catch {}
     }
-    tt("Resolved the DM but couldn't navigate to it.");
+    if (channelId && _tryNavigate(channelId)) {
+      tt("Opening DM with " + _dmNameFor(id));
+      return;
+    }
+
+    tt(
+      channelId
+        ? "Resolved the DM but no navigator worked on this build."
+        : "Couldn't open a DM - no working DM API found on this build.",
+    );
   }
   function closePanel(nav) {
     try {
