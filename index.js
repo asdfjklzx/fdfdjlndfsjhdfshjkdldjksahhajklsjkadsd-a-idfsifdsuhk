@@ -877,10 +877,51 @@
     }
     return !1;
   }
-  // Resolve (or create) the DM channel for a user and navigate to it.
-  // Accepts a bare ID, a <@id> mention, or a profile URL. iOS-first: on mobile
-  // openPrivateChannel both creates and navigates, so we try that before
-  // falling back to resolve-then-select. Every lookup is guarded.
+  // Find an existing 1:1 DM channel id for this user, verifying type === 1
+  // (a real DM) and NOT type 3 (group). Tries the direct selector first, then
+  // scans private channels so it works even when getDMFromUserId misses.
+  function _findExistingDM(id) {
+    try {
+      const CS = l.findByStoreName("ChannelStore");
+      const PCS = l.findByStoreName("PrivateChannelStore");
+      let cid = null;
+      try {
+        if (PCS && typeof PCS.getDMFromUserId === "function")
+          cid = PCS.getDMFromUserId(id);
+      } catch {}
+      if (cid) {
+        const ch = CS && CS.getChannel ? CS.getChannel(cid) : null;
+        if (ch && ch.type === 1) return cid;
+      }
+      let ids = [];
+      try {
+        if (PCS && typeof PCS.getPrivateChannelIds === "function")
+          ids = PCS.getPrivateChannelIds() || [];
+      } catch {}
+      for (let i = 0; i < ids.length; i++) {
+        const ch = CS && CS.getChannel ? CS.getChannel(ids[i]) : null;
+        if (!ch || ch.type !== 1) continue; // 1:1 DMs only, skip groups (3)
+        const r = ch.recipients || [];
+        if (r.length !== 1) continue;
+        const rid = typeof r[0] === "string" ? r[0] : r[0] && r[0].id;
+        if (rid === id) return ids[i];
+      }
+    } catch {}
+    return null;
+  }
+  // Confirm a channel id is a real 1:1 DM (type 1), not a group (type 3).
+  function _isDM(channelId) {
+    try {
+      const CS = l.findByStoreName("ChannelStore");
+      const ch = CS && CS.getChannel ? CS.getChannel(channelId) : null;
+      return !!ch && ch.type === 1;
+    } catch {}
+    return !1;
+  }
+  // Resolve (or create) the 1:1 DM channel for a user and navigate to it.
+  // Accepts a bare ID, a <@id> mention, or a profile URL. Guards every lookup
+  // and refuses to navigate to anything that isn't a verified 1:1 DM, so it
+  // can never dump you into a one-person group.
   async function openDM(userId) {
     const id = _extractUserId(userId);
     if (!id) {
@@ -889,45 +930,58 @@
     }
     const acts = l.findByProps("openPrivateChannel");
     const ens = l.findByProps("ensurePrivateChannel");
-    const PCS = l.findByStoreName("PrivateChannelStore");
 
-    // 1) Existing 1:1 DM? Resolve its channel id and just navigate there.
-    //    This avoids openPrivateChannel entirely for the common case, so no
-    //    chance of it spawning a group.
-    let channelId = null;
-    try {
-      if (PCS && typeof PCS.getDMFromUserId === "function")
-        channelId = PCS.getDMFromUserId(id);
-    } catch {}
+    // 1) Existing verified 1:1 DM? Navigate straight to it. No create call,
+    //    so no chance of spawning a group.
+    let channelId = _findExistingDM(id);
     if (channelId && _tryNavigate(channelId)) {
       tt("Opening DM with " + _dmNameFor(id));
       return;
     }
 
-    // 2) No existing DM: create the 1:1 channel with ensurePrivateChannel
-    //    (returns the channel id), then navigate to it.
+    // 2) No existing DM: create with ensurePrivateChannel (returns a channel
+    //    id), then VERIFY the result is a 1:1 before navigating.
     if (!channelId && ens && typeof ens.ensurePrivateChannel === "function") {
       try {
         channelId = await ens.ensurePrivateChannel(id);
       } catch {}
     }
-    if (channelId && _tryNavigate(channelId)) {
-      tt("Opening DM with " + _dmNameFor(id));
-      return;
+    if (channelId) {
+      if (_isDM(channelId)) {
+        if (_tryNavigate(channelId)) {
+          tt("Opening DM with " + _dmNameFor(id));
+          return;
+        }
+      } else {
+        // The create path produced a group (or unknown type). Do NOT navigate
+        // into it. Re-scan once in case the real 1:1 now exists in the store.
+        const real = _findExistingDM(id);
+        if (real && _tryNavigate(real)) {
+          tt("Opening DM with " + _dmNameFor(id));
+          return;
+        }
+        tt(
+          "This build's create call makes a group, not a 1:1 DM - run the DM probe so I can fix the create path.",
+        );
+        return;
+      }
     }
 
-    // 3) Last resort only: single-recipient openPrivateChannel (no array
-    //    shapes, so it won't create a group). Some builds create + navigate.
+    // 3) Last resort: single-recipient openPrivateChannel, then re-scan for the
+    //    resulting verified 1:1 and navigate to that (never to a group).
     if (_tryOpenPrivate(acts, id)) {
-      tt("Opening DM with " + _dmNameFor(id));
+      const real = _findExistingDM(id);
+      if (real && _tryNavigate(real)) {
+        tt("Opening DM with " + _dmNameFor(id));
+        return;
+      }
+      tt(
+        "Opened a channel but couldn't confirm it's a 1:1 DM - run the DM probe so I can fix the create path.",
+      );
       return;
     }
 
-    tt(
-      channelId
-        ? "Resolved the DM but no navigator worked on this build."
-        : "Couldn't open a DM - no working DM API found on this build.",
-    );
+    tt("Couldn't open a DM - no working DM API found on this build.");
   }
   function closePanel(nav) {
     try {
