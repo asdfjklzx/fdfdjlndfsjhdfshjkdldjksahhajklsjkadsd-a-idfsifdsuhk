@@ -841,9 +841,48 @@
     }
     return !1;
   }
+  // On iOS, selecting the channel isn't enough — it sets the active channel
+  // but doesn't push the messages screen. Try to drive the RN navigation
+  // stack to actually foreground the chat. Best-effort; guarded.
+  function _pushMessagesScreen(channelId) {
+    // Preferred: use Discord's own row-tap handler, which does select + push.
+    try {
+      const RA = l.findByProps("handleTapChannel");
+      if (RA && typeof RA.handleTapChannel === "function") {
+        RA.handleTapChannel(channelId);
+        return !0;
+      }
+    } catch {}
+    try {
+      const RA2 = l.findByProps("handlePressChannel");
+      if (RA2 && typeof RA2.handlePressChannel === "function") {
+        RA2.handlePressChannel(channelId);
+        return !0;
+      }
+    } catch {}
+    // Fallback: raw React Navigation push to the messages route.
+    try {
+      const NavRef = l.findByProps("getRootNavigationRef");
+      const ref =
+        NavRef &&
+        typeof NavRef.getRootNavigationRef === "function" &&
+        NavRef.getRootNavigationRef();
+      if (ref && typeof ref.navigate === "function") {
+        const routes = ["messages", "Messages", "Channel", "channel"];
+        for (let i = 0; i < routes.length; i++) {
+          try {
+            ref.navigate(routes[i], { channelId: channelId });
+            return !0;
+          } catch {}
+        }
+      }
+    } catch {}
+    return !1;
+  }
   // Try to navigate to an already-resolved channel id via whatever navigator
-  // this build exposes. selectChannel is the mobile/iOS path; the others are
-  // desktop-style fallbacks. Returns true if a call went through.
+  // this build exposes. selectChannel sets the active channel (mobile/iOS),
+  // then _pushMessagesScreen foregrounds the chat; the rest are desktop-style
+  // fallbacks. Returns true if a call went through.
   function _tryNavigate(channelId) {
     if (!channelId) return !1;
     const sc = l.findByProps("selectChannel");
@@ -857,10 +896,14 @@
       for (let i = 0; i < shapes.length; i++) {
         try {
           sc.selectChannel(shapes[i]);
+          // Foreground the messages screen; on iOS select alone won't.
+          _pushMessagesScreen(channelId);
           return !0;
         } catch {}
       }
     }
+    // If there's no selectChannel, a bare push may still work.
+    if (_pushMessagesScreen(channelId)) return !0;
     const tr = l.findByProps("transitionToChannel");
     if (tr && typeof tr.transitionToChannel === "function") {
       try {
@@ -1387,7 +1430,84 @@
           if (typeof u4 === "function") K.push(u4);
         }
       } catch {}
-      b = y.before("dispatch", n.FluxDispatcher, function (s) {
+  const sdmCommand = reg({
+  name: "sdm",
+  displayName: "sdm",
+  description: "Open a DM and add a local spoofed message.",
+  displayDescription: "Open a DM and add a local spoofed message.",
+  type: 1,
+  inputType: 1,
+  applicationId: "-1",
+  options: [
+    {
+      name: "user",
+      displayName: "user",
+      description: "User ID, mention, or profile URL.",
+      displayDescription: "User ID, mention, or profile URL.",
+      type: 3,
+      required: !0,
+    },
+    {
+      name: "message",
+      displayName: "message",
+      description: "The local-only spoofed message to add.",
+      displayDescription: "The local-only spoofed message to add.",
+      type: 3,
+      required: !0,
+    },
+  ],
+  execute: async function (args) {
+    try {
+      const map = Array.isArray(args)
+        ? Object.fromEntries(
+            args.map(function (aa) {
+              return [aa?.name, aa?.value];
+            }),
+          )
+        : args ?? {};
+
+      const result = await openDM("" + (map.user ?? ""));
+      const content = ("" + (map.message ?? "")).trim();
+
+      if (!result) return;
+
+      if (!content) {
+        tt("Enter a message to spoof.");
+        return;
+      }
+
+      await new Promise(function (resolve) {
+        setTimeout(resolve, 250);
+      });
+
+      const timestamp = nowISO();
+      const id = genId(timestamp);
+
+      await P(
+        result.channelId,
+        result.userId,
+        content,
+        timestamp,
+        id,
+      );
+
+      z(
+        result.channelId,
+        result.userId,
+        content,
+        id,
+        timestamp,
+      );
+
+      tt("Opened DM and added local spoofed message.");
+    } catch {
+      tt("Couldn't run /sdm.");
+    }
+  },
+});
+
+if (typeof sdmCommand === "function") K.push(sdmCommand);     
+ b = y.before("dispatch", n.FluxDispatcher, function (s) {
         const [c] = s;
         if (
           c.type === "MESSAGE_UPDATE" &&
