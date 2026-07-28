@@ -1,12 +1,1 @@
-{
-    "name":  "Local Message Spoofer",
-    "description":  "Create local-only fake messages, edit them locally, and build fake conversations with organic timestamps. Includes a /dm quick-open command. Testing and novelty only - nothing is sent off-device.",
-    "authors":  [
-                    {
-                        "name":  "jack",
-                        "id":  "1390362049581678672"
-                    }
-                ],
-    "main":  "index.js",
-    "hash":  "e333c4b5a978f9f7662e67daca1229a9fc8a43c9675fd0c45a4b8a390a24303f"
-}
+hi
